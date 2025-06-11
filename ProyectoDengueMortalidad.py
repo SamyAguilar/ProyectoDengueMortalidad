@@ -1581,6 +1581,6 @@ st.markdown("""
     Dashboard desarrollado para análisis epidemiológico de dengue en México<br>
     Incluye capacidades de predicción usando Random Forest y análisis temporal<br>
     Datos actualizados automáticamente desde la base de datos epidemiológica<br>
-    <strong>Nuevas funcionalidades:</strong> Selección flexible de años • Predicción por año específico • Análisis estacional avanzado
+    Selección flexible de años • Predicción por año específico • Análisis estacional avanzado<br>
 </div>
 """, unsafe_allow_html=True)
