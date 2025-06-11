@@ -3,281 +3,431 @@ import mysql.connector
 from mysql.connector import Error
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
+from datetime import datetime
 
 # --- Configuración de la Base de Datos ---
-# IMPORTANTE: Asegúrate de que estos detalles sean correctos para tu configuración de MySQL.
-# Si tu MySQL no está en localhost, reemplaza 'localhost' con la IP o el nombre de host.
 DB_CONFIG = {
     "host": "localhost",
-    "database": "denguebd",  # Tu base de datos se llama 'denguebd'
-    "user": "root",          # ¡REEMPLAZA con tu usuario de MySQL!
-    "password": "248613"     # ¡REEMPLAZA con tu contraseña de MySQL!
+    "database": "pruebita",
+    "user": "root",
+    "password": "248613"
 }
 
-# --- Función de Conexión a la Base de Datos ---
-# Esta función ahora será usada internamente por la función cacheada.
-def create_db_connection():
-    """Establece una conexión a la base de datos. Retorna el objeto de conexión o None en caso de error."""
-    connection = None
+# --- Pool de Conexiones ---
+@st.cache_resource
+def init_connection():
+    """Inicializa el pool de conexiones a la base de datos."""
     try:
         connection = mysql.connector.connect(**DB_CONFIG)
         if connection.is_connected():
             return connection
     except Error as e:
-        st.error(f"Error al conectar a la base de datos MySQL: {e}")
-    return None
+        st.error(f"Error al conectar a la base de datos: {e}")
+        return None
 
-# --- Función de Obtención de Datos con Caché ---
-# Almacena en caché los datos durante 1 hora (3600 segundos) para evitar llamadas repetidas a la base de datos al volver a ejecutar.
-# ¡IMPORTANTE!: Esta función ahora se conecta y desconecta de la base de datos por sí misma.
+# --- Funciones de Consulta Optimizadas ---
 @st.cache_data(ttl=3600)
-def get_dengue_data(): # <--- CAMBIO AQUÍ: Ya no recibe 'conn' como argumento
-    """
-    Obtiene los datos de casos de dengue de la tabla 'casos_dengue' para los años 2020-2025.
-    Establece su propia conexión a la base de datos.
-    """
-    conn = create_db_connection() # <--- CAMBIO AQUÍ: Crea la conexión internamente
-    if conn is None:
-        st.warning("No se pudo establecer conexión con la base de datos para cargar los datos.")
-        return pd.DataFrame()
-
-    cursor = conn.cursor(dictionary=True)
-    # Consulta para seleccionar todos los datos dentro del rango de años especificado
-    query = "SELECT * FROM casos_dengue WHERE anio_datos BETWEEN 2020 AND 2025"
+def get_years_available():
+    """Obtiene los años disponibles en la base de datos."""
+    conn = init_connection()
+    if not conn:
+        return []
+    
     try:
-        cursor.execute(query)
-        data = cursor.fetchall()  # Obtener todas las filas
-        df = pd.DataFrame(data)   # Convertir a DataFrame de pandas
-        st.success("Datos de dengue cargados exitosamente.")
+        cursor = conn.cursor()
+        cursor.execute("SELECT DISTINCT anio_datos FROM casos_dengue ORDER BY anio_datos")
+        years = [row[0] for row in cursor.fetchall()]
+        return years
+    except Error as e:
+        st.error(f"Error al obtener años: {e}")
+        return []
+    finally:
+        cursor.close()
+
+@st.cache_data(ttl=3600)
+def get_estados():
+    """Obtiene la lista de estados con sus nombres."""
+    conn = init_connection()
+    if not conn:
+        return pd.DataFrame()
+    
+    try:
+        query = """
+        SELECT e.id_estado, e.nombre 
+        FROM estados e
+        ORDER BY e.nombre
+        """
+        df = pd.read_sql(query, conn)
         return df
     except Error as e:
-        st.error(f"Error al obtener los datos de dengue: {e}")
+        st.error(f"Error al obtener estados: {e}")
         return pd.DataFrame()
-    finally:
-        if cursor:
-            cursor.close()
-        if conn and conn.is_connected(): # <--- CAMBIO AQUÍ: Cierra la conexión internamente
-            conn.close()
-            # st.info("Conexión a la base de datos cerrada por get_dengue_data.") # Opcional para depurar
 
-# --- Mapeos de Datos ---
-# Estos mapeos se asumen en base a prácticas comunes.
-# Por favor, ajústalos si tu base de datos utiliza códigos diferentes.
-SEXO_MAP = {
-    1: "Hombre",
-    2: "Mujer",
-    99: "No especificado" # Marcador de posición para valores desconocidos/no especificados
-}
-
-TIPO_PACIENTE_MAP = {
-    1: "Ambulatorio",
-    2: "Hospitalizado"
-}
-
-DEFUNCION_MAP = {
-    1: "Sí (Fallecido)",
-    2: "No (Vivo)",
-    99: "No aplica/Desconocido"
-}
-
-ESTATUS_CASO_MAP = {
-    1: "Confirmado",
-    2: "Descartado",
-    3: "Probable"
-}
-
-# --- Diseño y Lógica de la Aplicación Streamlit ---
-# Configurar la página de Streamlit para un diseño amplio
-st.set_page_config(layout="wide", page_title="Dashboard de Casos de Dengue")
-
-st.title("📊 Dashboard de Casos de Dengue (2020-2025)")
-st.markdown("Explora las métricas y tendencias de los casos de dengue por estado y municipio.")
-
-# Ya no necesitamos una conexión persistente aquí, ya que la función cacheada la maneja.
-# Intentar conectar a la base de datos (solo para verificación inicial de la conexión, no se usa para pasar a get_dengue_data)
-initial_conn_check = create_db_connection() # Verifica si se puede conectar al inicio
-if initial_conn_check:
-    if initial_conn_check.is_connected():
-        initial_conn_check.close() # Cierra la conexión de verificación inicial
-    # Obtener datos usando la función en caché
-    # Ahora la función get_dengue_data() no necesita argumentos de conexión
-    df_dengue = get_dengue_data() # <--- CAMBIO AQUÍ: Llamada sin argumentos
-
-    # Continuar solo si los datos se cargaron exitosamente
-    if not df_dengue.empty:
-        # --- Preprocesamiento de Datos ---
-        # Aplicar etiquetas legibles por humanos usando los mapeos definidos
-        df_dengue['SEXO_LABEL'] = df_dengue['SEXO'].map(SEXO_MAP).fillna("Desconocido")
-        df_dengue['TIPO_PACIENTE_LABEL'] = df_dengue['TIPO_PACIENTE'].map(TIPO_PACIENTE_MAP).fillna("Desconocido")
-        df_dengue['DEFUNCION_LABEL'] = df_dengue['DEFUNCION'].map(DEFUNCION_MAP).fillna("Desconocido")
-        df_dengue['ESTATUS_CASO_LABEL'] = df_dengue['ESTATUS_CASO'].map(ESTATUS_CASO_MAP).fillna("Desconocido")
-
-        # Convertir 'FECHA_SIGN_SINTOMAS' a objetos datetime para posibles análisis de series temporales
-        df_dengue['FECHA_SIGN_SINTOMAS'] = pd.to_datetime(df_dengue['FECHA_SIGN_SINTOMAS'], errors='coerce')
-        # Extraer el nombre del mes para obtener información de series temporales
-        df_dengue['MES_SINTOMAS'] = df_dengue['FECHA_SIGN_SINTOMAS'].dt.month_name(locale='es_ES') # Usar nombres de meses en español
-
-        # Crear grupos de edad para un mejor análisis demográfico
-        bins = [0, 5, 12, 18, 30, 50, 65, 120] # Límite superior extendido a 120 para mayor robustez
-        labels = ['0-4', '5-11', '12-17', '18-29', '30-49', '50-64', '65+']
-        df_dengue['GRUPO_EDAD'] = pd.cut(df_dengue['EDAD_ANOS'], bins=bins, labels=labels, right=False, include_lowest=True)
-
-        # --- Filtros de la Barra Lateral ---
-        st.sidebar.header("Filtros de Datos")
-
-        # Filtro de año: permite la selección de múltiples años
-        all_years = sorted(df_dengue['anio_datos'].unique().tolist())
-        selected_years = st.sidebar.multiselect("Seleccionar Año(s)", all_years, default=all_years)
-
-        # Filtro de estado: permite la selección de múltiples estados (ENTIDAD_RES son IDs enteros)
-        # Se recomienda mapear estos IDs a nombres de estados reales si es posible para una mejor legibilidad.
-        all_states = sorted(df_dengue['ENTIDAD_RES'].unique().tolist())
-        selected_states = st.sidebar.multiselect("Seleccionar Estado (ID ENTIDAD_RES)", all_states, default=all_states)
-
-        # Filtro de municipio: dependiente de los estados seleccionados
-        # Primero filtra el DataFrame por los estados seleccionados para obtener los municipios relevantes
-        filtered_by_state_df = df_dengue[df_dengue['ENTIDAD_RES'].isin(selected_states)]
-        all_municipalities = sorted(filtered_by_state_df['MUNICIPIO_RES'].unique().tolist())
-        selected_municipalities = st.sidebar.multiselect("Seleccionar Municipio (ID MUNICIPIO_RES)", all_municipalities, default=all_municipalities)
-
-        # Aplicar todos los filtros seleccionados para crear el DataFrame filtrado final
-        filtered_df = df_dengue[
-            (df_dengue['anio_datos'].isin(selected_years)) &
-            (df_dengue['ENTIDAD_RES'].isin(selected_states)) &
-            (df_dengue['MUNICIPIO_RES'].isin(selected_municipalities))
-        ]
-
-        # --- Mostrar Contenido del Dashboard ---
-        if filtered_df.empty:
-            st.warning("No hay datos disponibles para la selección de filtros actual. Por favor, ajusta tus filtros.")
+@st.cache_data(ttl=3600)
+def get_municipios(estado_id=None):
+    """Obtiene la lista de municipios, opcionalmente filtrado por estado."""
+    conn = init_connection()
+    if not conn:
+        return pd.DataFrame()
+    
+    try:
+        if estado_id:
+            query = """
+            SELECT m.id, m.clave, m.municipio, m.entidad
+            FROM municipios m
+            WHERE m.entidad = %s
+            ORDER BY m.municipio
+            """
+            df = pd.read_sql(query, conn, params=[estado_id])
         else:
-            st.header("Métricas Clave (KPIs)")
+            query = """
+            SELECT m.id, m.clave, m.municipio, m.entidad
+            FROM municipios m
+            ORDER BY m.municipio
+            """
+            df = pd.read_sql(query, conn)
+        return df
+    except Error as e:
+        st.error(f"Error al obtener municipios: {e}")
+        return pd.DataFrame()
 
-            # Usar columnas para mostrar los KPIs lado a lado
-            col1, col2, col3, col4 = st.columns(4)
+@st.cache_data(ttl=1800)
+def get_casos_por_anio(years=None):
+    """Obtiene casos agrupados por año."""
+    conn = init_connection()
+    if not conn:
+        return pd.DataFrame()
+    
+    try:
+        if years:
+            placeholders = ','.join(['%s'] * len(years))
+            query = f"""
+            SELECT 
+                c.anio_datos,
+                COUNT(*) as total_casos,
+                SUM(CASE WHEN c.DEFUNCION = 1 THEN 1 ELSE 0 END) as defunciones,
+                SUM(CASE WHEN c.ESTATUS_CASO = 1 THEN 1 ELSE 0 END) as confirmados
+            FROM casos_dengue c
+            WHERE c.anio_datos IN ({placeholders})
+            GROUP BY c.anio_datos
+            ORDER BY c.anio_datos
+            """
+            df = pd.read_sql(query, conn, params=years)
+        else:
+            query = """
+            SELECT 
+                c.anio_datos,
+                COUNT(*) as total_casos,
+                SUM(CASE WHEN c.DEFUNCION = 1 THEN 1 ELSE 0 END) as defunciones,
+                SUM(CASE WHEN c.ESTATUS_CASO = 1 THEN 1 ELSE 0 END) as confirmados
+            FROM casos_dengue c
+            GROUP BY c.anio_datos
+            ORDER BY c.anio_datos
+            """
+            df = pd.read_sql(query, conn)
+        return df
+    except Error as e:
+        st.error(f"Error al obtener casos por año: {e}")
+        return pd.DataFrame()
 
-            total_cases = len(filtered_df)
-            # Contar defunciones donde DEFUNCION es 1
-            total_deaths = filtered_df[filtered_df['DEFUNCION'] == 1].shape[0]
-            # Contar casos confirmados donde ESTATUS_CASO es 1
-            confirmed_cases = filtered_df[filtered_df['ESTATUS_CASO'] == 1].shape[0]
-            # Contar casos hospitalizados donde TIPO_PACIENTE es 2
-            hospitalized_cases = filtered_df[filtered_df['TIPO_PACIENTE'] == 2].shape[0]
+@st.cache_data(ttl=1800)
+def get_casos_por_estado(years=None):
+    """Obtiene casos agrupados por estado."""
+    conn = init_connection()
+    if not conn:
+        return pd.DataFrame()
+    
+    try:
+        if years:
+            placeholders = ','.join(['%s'] * len(years))
+            query = f"""
+            SELECT 
+                e.nombre as estado,
+                e.id_estado,
+                COUNT(c.id) as total_casos,
+                SUM(CASE WHEN c.DEFUNCION = 1 THEN 1 ELSE 0 END) as defunciones,
+                SUM(CASE WHEN c.ESTATUS_CASO = 1 THEN 1 ELSE 0 END) as confirmados
+            FROM casos_dengue c
+            JOIN estados e ON c.ENTIDAD_RES = e.id_estado
+            WHERE c.anio_datos IN ({placeholders})
+            GROUP BY e.id_estado, e.nombre
+            ORDER BY total_casos DESC
+            """
+            df = pd.read_sql(query, conn, params=years)
+        else:
+            query = """
+            SELECT 
+                e.nombre as estado,
+                e.id_estado,
+                COUNT(c.id) as total_casos,
+                SUM(CASE WHEN c.DEFUNCION = 1 THEN 1 ELSE 0 END) as defunciones,
+                SUM(CASE WHEN c.ESTATUS_CASO = 1 THEN 1 ELSE 0 END) as confirmados
+            FROM casos_dengue c
+            JOIN estados e ON c.ENTIDAD_RES = e.id_estado
+            GROUP BY e.id_estado, e.nombre
+            ORDER BY total_casos DESC
+            """
+            df = pd.read_sql(query, conn)
+        return df
+    except Error as e:
+        st.error(f"Error al obtener casos por estado: {e}")
+        return pd.DataFrame()
 
-            with col1:
-                st.metric("Total de Casos", total_cases)
-            with col2:
-                st.metric("Casos Confirmados", confirmed_cases)
-            with col3:
-                st.metric("Total de Defunciones", total_deaths)
-            with col4:
-                st.metric("Casos Hospitalizados", hospitalized_cases)
+@st.cache_data(ttl=1800)
+def get_casos_por_municipio(estado_id=None, years=None, limit=20):
+    """Obtiene casos agrupados por municipio."""
+    conn = init_connection()
+    if not conn:
+        return pd.DataFrame()
+    
+    try:
+        conditions = []
+        params = []
+        
+        if years:
+            placeholders = ','.join(['%s'] * len(years))
+            conditions.append(f"c.anio_datos IN ({placeholders})")
+            params.extend(years)
+        
+        if estado_id:
+            conditions.append("c.ENTIDAD_RES = %s")
+            params.append(estado_id)
+        
+        where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
+        
+        query = f"""
+        SELECT 
+            m.municipio,
+            e.nombre as estado,
+            COUNT(c.id) as total_casos,
+            SUM(CASE WHEN c.DEFUNCION = 1 THEN 1 ELSE 0 END) as defunciones,
+            SUM(CASE WHEN c.ESTATUS_CASO = 1 THEN 1 ELSE 0 END) as confirmados
+        FROM casos_dengue c
+        JOIN estados e ON c.ENTIDAD_RES = e.id_estado
+        JOIN municipios m ON c.MUNICIPIO_RES = m.clave AND c.ENTIDAD_RES = m.entidad
+        {where_clause}
+        GROUP BY m.municipio, e.nombre
+        ORDER BY total_casos DESC
+        LIMIT %s
+        """
+        params.append(limit)
+        df = pd.read_sql(query, conn, params=params)
+        return df
+    except Error as e:
+        st.error(f"Error al obtener casos por municipio: {e}")
+        return pd.DataFrame()
 
+# --- Configuración de la página ---
+st.set_page_config(
+    page_title="Dashboard Dengue México",
+    page_icon="🦟",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-            st.markdown("---") # Separador visual
-            st.header("Visualizaciones de Datos")
+# --- Título y descripción ---
+st.title("🦟 Dashboard de Casos de Dengue en México")
+st.markdown("### Análisis de casos de dengue por año, estado y municipio")
 
-            # --- Fila de Gráficos 1: Casos por Año y Casos por Sexo ---
-            chart_col1, chart_col2 = st.columns(2)
+# --- Sidebar para filtros ---
+st.sidebar.header("🔍 Filtros")
 
-            with chart_col1:
-                st.subheader("Casos de Dengue por Año")
-                # Agrupar por año y contar casos
-                cases_by_year = filtered_df['anio_datos'].value_counts().sort_index().reset_index()
-                cases_by_year.columns = ['Año', 'Número de Casos'] # Renombrar columnas para mayor claridad
-                fig_year = px.bar(cases_by_year, x='Año', y='Número de Casos',
-                                  title='Número de Casos de Dengue por Año',
-                                  labels={'Número de Casos': 'Casos'},
-                                  color_discrete_sequence=px.colors.qualitative.Pastel)
-                st.plotly_chart(fig_year, use_container_width=True)
-
-            with chart_col2:
-                st.subheader("Distribución de Casos por Sexo")
-                # Agrupar por SEXO_LABEL y contar casos
-                cases_by_sex = filtered_df['SEXO_LABEL'].value_counts().reset_index()
-                cases_by_sex.columns = ['Sexo', 'Número de Casos']
-                fig_sex = px.pie(cases_by_sex, values='Número de Casos', names='Sexo',
-                                 title='Distribución de Casos por Sexo',
-                                 color_discrete_sequence=px.colors.qualitative.Set2)
-                st.plotly_chart(fig_sex, use_container_width=True)
-
-            # --- Fila de Gráficos 2: Casos por Estado y Casos por Municipio ---
-            chart_col3, chart_col4 = st.columns(2)
-
-            with chart_col3:
-                st.subheader("Casos por Estado de Residencia")
-                # Agrupar por ENTIDAD_RES y contar casos
-                cases_by_state = filtered_df['ENTIDAD_RES'].value_counts().sort_index().reset_index()
-                cases_by_state.columns = ['Estado (ID)', 'Número de Casos']
-                fig_state = px.bar(cases_by_state, x='Estado (ID)', y='Número de Casos',
-                                   title='Casos de Dengue por Estado de Residencia',
-                                   labels={'Número de Casos': 'Casos'},
-                                   color_discrete_sequence=px.colors.qualitative.Pastel1)
-                st.plotly_chart(fig_state, use_container_width=True)
-
-            with chart_col4:
-                st.subheader("Casos por Municipio de Residencia")
-                # Agrupar por MUNICIPIO_RES y contar casos, mostrar los 10 primeros para mayor legibilidad
-                cases_by_municipality = filtered_df['MUNICIPIO_RES'].value_counts().head(10).reset_index()
-                cases_by_municipality.columns = ['Municipio (ID)', 'Número de Casos']
-                fig_municipality = px.bar(cases_by_municipality, x='Municipio (ID)', y='Número de Casos',
-                                         title='Top 10 Municipios con Casos de Dengue',
-                                         labels={'Número de Casos': 'Casos'},
-                                         color_discrete_sequence=px.colors.qualitative.Set3)
-                st.plotly_chart(fig_municipality, use_container_width=True)
-
-            # --- Fila de Gráficos 3: Casos por Tipo de Paciente y Casos por Estatus del Caso ---
-            chart_col5, chart_col6 = st.columns(2)
-
-            with chart_col5:
-                st.subheader("Distribución de Casos por Tipo de Paciente")
-                # Agrupar por TIPO_PACIENTE_LABEL y contar casos
-                cases_by_patient_type = filtered_df['TIPO_PACIENTE_LABEL'].value_counts().reset_index()
-                cases_by_patient_type.columns = ['Tipo de Paciente', 'Número de Casos']
-                fig_patient_type = px.pie(cases_by_patient_type, values='Número de Casos', names='Tipo de Paciente',
-                                          title='Distribución de Casos por Tipo de Paciente',
-                                          color_discrete_sequence=px.colors.qualitative.Pastel2)
-                st.plotly_chart(fig_patient_type, use_container_width=True)
-
-            with chart_col6:
-                st.subheader("Distribución de Casos por Estatus")
-                # Agrupar por ESTATUS_CASO_LABEL y contar casos
-                cases_by_status = filtered_df['ESTATUS_CASO_LABEL'].value_counts().reset_index()
-                cases_by_status.columns = ['Estatus del Caso', 'Número de Casos']
-                fig_status = px.pie(cases_by_status, values='Número de Casos', names='Estatus del Caso',
-                                    title='Distribución de Casos por Estatus',
-                                    color_discrete_sequence=px.colors.qualitative.D3)
-                st.plotly_chart(fig_status, use_container_width=True)
-
-            # --- Fila de Gráficos 4: Casos por Grupo de Edad y Casos por Estado de Defunción ---
-            chart_col7, chart_col8 = st.columns(2)
-
-            with chart_col7:
-                st.subheader("Casos por Grupo de Edad")
-                # Agrupar por GRUPO_EDAD y contar casos, ordenar por el orden del grupo de edad
-                cases_by_age_group = filtered_df['GRUPO_EDAD'].value_counts().reindex(labels).reset_index()
-                cases_by_age_group.columns = ['Grupo de Edad', 'Número de Casos']
-                fig_age = px.bar(cases_by_age_group, x='Grupo de Edad', y='Número de Casos',
-                                 title='Número de Casos de Dengue por Grupo de Edad',
-                                 labels={'Número de Casos': 'Casos'},
-                                 color_discrete_sequence=px.colors.qualitative.Vivid)
-                st.plotly_chart(fig_age, use_container_width=True)
-
-            with chart_col8:
-                st.subheader("Casos por Resultado de Defunción")
-                # Agrupar por DEFUNCION_LABEL y contar casos
-                cases_by_defuncion = filtered_df['DEFUNCION_LABEL'].value_counts().reset_index()
-                cases_by_defuncion.columns = ['Resultado de Defunción', 'Número de Casos']
-                fig_defuncion = px.pie(cases_by_defuncion, values='Número de Casos', names='Resultado de Defunción',
-                                       title='Distribución de Casos por Resultado de Defunción',
-                                       color_discrete_sequence=px.colors.qualitative.Safe)
-                st.plotly_chart(fig_defuncion, use_container_width=True)
-
-            st.markdown("---")
-            st.subheader("Datos Crudos (Primeras 100 Filas)")
-            st.dataframe(filtered_df.head(100), use_container_width=True)
-
-    else:
-        st.error("No se pudieron cargar los datos de dengue o el DataFrame está vacío.")
+# Obtener años disponibles
+years_available = get_years_available()
+if years_available:
+    selected_years = st.sidebar.multiselect(
+        "Seleccionar años:",
+        options=years_available,
+        default=years_available,
+        help="Selecciona uno o más años para el análisis"
+    )
 else:
-    st.error("No se pudo establecer conexión con la base de datos MySQL. Por favor, verifica la configuración.")
+    st.error("No se pudieron cargar los años disponibles")
+    st.stop()
+
+# Obtener estados
+df_estados = get_estados()
+if not df_estados.empty:
+    estado_options = ["Todos"] + df_estados['nombre'].tolist()
+    selected_estado_name = st.sidebar.selectbox(
+        "Seleccionar estado:",
+        options=estado_options,
+        help="Selecciona un estado específico o 'Todos' para ver todos"
+    )
+    
+    if selected_estado_name != "Todos":
+        selected_estado_id = df_estados[df_estados['nombre'] == selected_estado_name]['id_estado'].iloc[0]
+    else:
+        selected_estado_id = None
+else:
+    st.error("No se pudieron cargar los estados")
+    st.stop()
+
+# --- Contenido principal ---
+if selected_years:
+    # Métricas principales
+    st.header("📊 Métricas Generales")
+    
+    # Obtener datos generales
+    df_anios = get_casos_por_anio(selected_years)
+    
+    if not df_anios.empty:
+        total_casos = df_anios['total_casos'].sum()
+        total_defunciones = df_anios['defunciones'].sum()
+        total_confirmados = df_anios['confirmados'].sum()
+        tasa_mortalidad = (total_defunciones / total_casos * 100) if total_casos > 0 else 0
+        
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric("Total de Casos", f"{total_casos:,}")
+        with col2:
+            st.metric("Casos Confirmados", f"{total_confirmados:,}")
+        with col3:
+            st.metric("Defunciones", f"{total_defunciones:,}")
+        with col4:
+            st.metric("Tasa de Mortalidad", f"{tasa_mortalidad:.2f}%")
+    
+    # Gráfica de casos por año
+    st.header("📈 Tendencia por Años")
+    
+    if not df_anios.empty:
+        fig_anios = go.Figure()
+        
+        fig_anios.add_trace(go.Bar(
+            x=df_anios['anio_datos'],
+            y=df_anios['total_casos'],
+            name='Total de Casos',
+            marker_color='lightblue',
+            text=df_anios['total_casos'],
+            textposition='auto'
+        ))
+        
+        fig_anios.add_trace(go.Scatter(
+            x=df_anios['anio_datos'],
+            y=df_anios['defunciones'],
+            mode='lines+markers',
+            name='Defunciones',
+            line=dict(color='red', width=3),
+            marker=dict(size=8),
+            yaxis='y2'
+        ))
+        
+        fig_anios.update_layout(
+            title='Casos de Dengue por Año',
+            xaxis_title='Año',
+            yaxis_title='Número de Casos',
+            yaxis2=dict(
+                title='Defunciones',
+                overlaying='y',
+                side='right',
+                showgrid=False
+            ),
+            hovermode='x unified',
+            height=500
+        )
+        
+        st.plotly_chart(fig_anios, use_container_width=True)
+    
+    # Gráficas por estado
+    st.header("🗺️ Análisis por Estados")
+    
+    df_estados_casos = get_casos_por_estado(selected_years)
+    
+    if not df_estados_casos.empty:
+        # Mostrar top 15 estados
+        df_top_estados = df_estados_casos.head(15)
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            fig_estados_bar = px.bar(
+                df_top_estados,
+                x='total_casos',
+                y='estado',
+                orientation='h',
+                title='Top 15 Estados con Más Casos',
+                labels={'total_casos': 'Número de Casos', 'estado': 'Estado'},
+                color='total_casos',
+                color_continuous_scale='Reds'
+            )
+            fig_estados_bar.update_layout(height=600)
+            st.plotly_chart(fig_estados_bar, use_container_width=True)
+        
+        with col2:
+            fig_estados_pie = px.pie(
+                df_top_estados,
+                values='total_casos',
+                names='estado',
+                title='Distribución de Casos por Estado (Top 15)'
+            )
+            fig_estados_pie.update_layout(height=600)
+            st.plotly_chart(fig_estados_pie, use_container_width=True)
+    
+    # Análisis por municipios
+    st.header("🏘️ Análisis por Municipios")
+    
+    # Controles para municipios
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        if selected_estado_name != "Todos":
+            st.subheader(f"Municipios en {selected_estado_name}")
+        else:
+            st.subheader("Municipios con Más Casos (Nacional)")
+    
+    with col2:
+        num_municipios = st.selectbox(
+            "Mostrar top:",
+            options=[10, 20, 30, 50],
+            index=1,
+            help="Número de municipios a mostrar"
+        )
+    
+    df_municipios = get_casos_por_municipio(
+        estado_id=selected_estado_id,
+        years=selected_years,
+        limit=num_municipios
+    )
+    
+    if not df_municipios.empty:
+        # Crear nombre completo para municipios
+        df_municipios['municipio_completo'] = df_municipios['municipio'] + ', ' + df_municipios['estado']
+        
+        fig_municipios = px.bar(
+            df_municipios,
+            x='total_casos',
+            y='municipio_completo',
+            orientation='h',
+            title=f'Top {num_municipios} Municipios con Más Casos',
+            labels={'total_casos': 'Número de Casos', 'municipio_completo': 'Municipio'},
+            color='total_casos',
+            color_continuous_scale='Blues',
+            text='total_casos'
+        )
+        
+        fig_municipios.update_layout(
+            height=max(400, num_municipios * 25),
+            yaxis={'categoryorder': 'total ascending'}
+        )
+        fig_municipios.update_traces(textposition='outside')
+        
+        st.plotly_chart(fig_municipios, use_container_width=True)
+        
+        # Tabla de municipios
+        st.subheader("📋 Detalle por Municipios")
+        df_municipios_display = df_municipios[['municipio', 'estado', 'total_casos', 'confirmados', 'defunciones']].copy()
+        df_municipios_display.columns = ['Municipio', 'Estado', 'Total Casos', 'Confirmados', 'Defunciones']
+        st.dataframe(df_municipios_display, use_container_width=True)
+    
+    else:
+        st.warning("No se encontraron datos de municipios para los filtros seleccionados.")
+
+else:
+    st.warning("Por favor, selecciona al menos un año para mostrar los datos.")
+
+# --- Información adicional ---
+st.sidebar.markdown("---")
+st.sidebar.markdown("**📊 Sobre este Dashboard**")
+st.sidebar.markdown("Este dashboard muestra datos de casos de dengue en México, permitiendo análisis por año, estado y municipio.")
+st.sidebar.markdown("**🔄 Actualización:** Los datos se actualizan automáticamente cada 30 minutos.")
